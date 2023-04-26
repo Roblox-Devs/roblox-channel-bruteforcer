@@ -15,7 +15,10 @@ fn main() {
         .timeout_read(std::time::Duration::from_secs(5))
         .build();
 
-    let lines: Vec<_> = reader.lines().map(|line| line.unwrap()).collect();
+    let lines: Vec<_> = reader
+        .lines()
+        .map(|line| line.unwrap().to_lowercase())
+        .collect();
     let lines_arc = Arc::new(Mutex::new(lines));
 
     let mut handles = vec![];
