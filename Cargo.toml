@@ -1,14 +1,12 @@
 [package]
-name = "robloxchnnelbruteforce"
-version = "0.1.0"
+name = "roblox-channel-bruteforcer"
+version = "1.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-# 90 would not be proud of all the depends that r unused
 [dependencies]
 ansi_term = "0.12.1"
-colored = "2.0.0"
 enable-ansi-support = "0.2.1"
-num_cpus = "1.15.0"
+reqwest = "0.11.17"
+structopt = "0.3.26"
 termcolor = "1.2.0"
-ureq = "2.6.2"
+tokio = { version = "1.28.1", features = ["full"] }

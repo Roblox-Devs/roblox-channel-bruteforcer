@@ -1,69 +1,111 @@
-use std::io::{BufRead, BufReader};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use ureq::{Agent, AgentBuilder};
-use colored::Colorize;
-use std::io::{self, Write};
-use ansi_term::Colour::Red;
-use std::fs::OpenOptions;
-use ansi_term::Colour::Green;
-fn main() {
-    enable_ansi_support::enable_ansi_support();
-    let file = std::fs::File::open("input.txt").unwrap();
+use tokio::sync::mpsc::{channel};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::fs::File;
+use tokio::io::BufReader;
+use tokio::task;
+use reqwest::Client;
+use ansi_term::Colour::{Red, Green, Purple};
+use structopt::StructOpt;
+use tokio::sync::Mutex;
+use std::sync::Arc;
+use std::convert::TryInto;
+
+#[derive(StructOpt)]
+#[structopt(name = "rbx channel bruteforcer", version = "1.1")]
+struct Opt {
+    #[structopt(long, help = "wordlist to use", display_order = 1)]
+    wordlist: String,
+
+    #[structopt(long, help = "prefix for channel name (ex: zproject)", display_order = 2)]
+    prefix: String,
+
+    #[structopt(long, help = "number of worker threads you want used", default_value = "250", display_order = 4)]
+    threads: u32,
+
+    #[structopt(long, help = "name of output file", display_order = 3)]
+    output: String,
+}
+#[tokio::main]
+async fn main() {
+    if let Err(err) = enable_ansi_support::enable_ansi_support() {
+        eprintln!("Failed to enable ANSI support: {:?}", err);
+        return;
+    }
+
+    let opt = Opt::from_args();
+    let file = File::open(&opt.wordlist).await.expect("Unable to open wordlist");
     let reader = BufReader::new(file);
-    let agent: Agent = AgentBuilder::new()
-        .timeout_read(std::time::Duration::from_secs(5))
-        .build();
+    let client = Client::new();
 
-    let lines: Vec<_> = reader.lines().map(|line| line.unwrap()).collect();
-    let lines_arc = Arc::new(Mutex::new(lines));
+    let (tx, rx) = channel(opt.threads.try_into().unwrap());
+    let num_threads = opt.threads;
 
-    let mut handles = vec![];
+    let mut tasks = Vec::new();
 
-    for _ in 0..num_cpus::get() {
-        let lines_arc = lines_arc.clone();
-        let agent = agent.clone();
+    let rx = Arc::new(Mutex::new(rx));
 
-        let handle = thread::spawn(move || {
+    for _ in 0..num_threads {
+        let rx = Arc::clone(&rx);
+
+        let client = client.clone();
+        let prefix = opt.prefix.clone();
+        let output = opt.output.clone();
+
+        let task = task::spawn(async move {
             loop {
                 let line = {
-                    let mut lines = lines_arc.lock().unwrap();
-                    if lines.is_empty() {
-                        break;
-                    }
-                    lines.pop().unwrap()
+                    let mut rx_guard = rx.lock().await;
+                    rx_guard.recv().await
                 };
-                let url = format!(
-                    "https://setup.rbxcdn.com/channel/z{}/DeployHistory.txt",
-                    line
-                );
-                match get_body(&agent, &url) {
-                    Ok(body) => {
-                        //append to file named "success.txt"
-                        let mut fileRef = OpenOptions::new().append(true).open("success.txt").expect("Unable to open file");   
-                        fileRef.write_all(url.as_bytes()).expect("Unable to write to file");
-                        fileRef.write_all("\n".as_bytes()).expect("Unable to write to file");
 
-                        println!("SUCCESS: {} ", Green.paint(&url))
-                    },
-                    Err(err) => eprintln!("{} {}", Red.paint("[FAILED]:"), url),
+                if let Some(line) = line {
+                    let url = format!("https://setup.rbxcdn.com/channel/{}{}/DeployHistory.txt", prefix, line);
+
+                    match get_body(&client, &url).await {
+                        Ok(response) => {
+                            if response.status().is_success() {
+                                let mut file_ref = tokio::fs::OpenOptions::new()
+                                    .append(true)
+                                    .open(&output)
+                                    .await
+                                    .expect("Unable to open file");
+                                file_ref.write_all(&url.as_bytes().to_owned().into_iter().chain("\n".as_bytes().to_owned().into_iter()).collect::<Vec<_>>()).await.expect("Unable to write to file");
+
+                                eprintln!("{} {}", Green.paint("[SUCCESS]:"), url);
+                            } else {
+                                eprintln!("{} {}", Red.paint("[FAILURE]:"), url);
+                            }
+                        }
+                        Err(_) => {
+                            eprintln!("{} {}", Purple.paint("[UNREACHABLE]:"), url);
+                        }
+                    }
+                } else {
+                    break;
                 }
             }
         });
 
-        handles.push(handle);
+        tasks.push(task);
     }
 
-    for handle in handles {
-        handle.join().unwrap();
+    let mut lines = reader.lines();
+    while let Some(line) = lines.next_line().await.expect("Failed to read line") {
+        tx.send(line).await.expect("Failed to send line to worker");
+    }
+
+    drop(tx);
+
+    for task in tasks {
+        task.await.expect("Thread panicked");
     }
 }
 
-fn get_body(agent: &Agent, url: &str) -> Result<String, ureq::Error> {
-    let body: String = agent
+async fn get_body(client: &Client, url: &str) -> Result<reqwest::Response, reqwest::Error> {
+    let response = client
         .get(url)
-        .set("Example-Header", "header value")
-        .call()?
-        .into_string()?;
-    Ok(body)
+        .send()
+        .await?;
+
+    Ok(response)
 }
